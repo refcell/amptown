@@ -5,13 +5,13 @@ Multi-agent orchestrator that spawns 6 [gastown](https://github.com/steveyegge/g
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/andreasbigger/amptown/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/refcell/amptown/main/install.sh | bash
 ```
 
 Or specify a custom install directory:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/andreasbigger/amptown/main/install.sh | bash -s -- --dir /usr/local/bin
+curl -fsSL https://raw.githubusercontent.com/refcell/amptown/main/install.sh | bash -s -- --dir /usr/local/bin
 ```
 
 ## Overview

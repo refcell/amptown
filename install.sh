@@ -3,16 +3,16 @@
 # amptown installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/andreasbigger/amptown/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/refcell/amptown/main/install.sh | bash
 #
 # Or with a custom install directory:
-#   curl -fsSL https://raw.githubusercontent.com/andreasbigger/amptown/main/install.sh | bash -s -- --dir ~/.local/bin
+#   curl -fsSL https://raw.githubusercontent.com/refcell/amptown/main/install.sh | bash -s -- --dir ~/.local/bin
 #
 
 set -euo pipefail
 
 # Configuration
-REPO="andreasbigger/amptown"
+REPO="refcell/amptown"
 BRANCH="main"
 SCRIPT_NAME="amptown"
 RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/${SCRIPT_NAME}"
