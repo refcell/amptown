@@ -77,8 +77,9 @@ ${BOLD}USAGE:${NC}
     $SCRIPT_NAME <command>
 
 ${BOLD}COMMANDS:${NC}
-    down              Stop all amptown agents
+    down              Stop all amptown agents and clean up temp files
     status            Show status of running agents
+    clean             Clean up stale temp directories (without stopping agents)
     monitor           Live monitor of agent status
 
 ${BOLD}DESCRIPTION:${NC}
@@ -100,7 +101,8 @@ ${BOLD}EXAMPLES:${NC}
     $SCRIPT_NAME ~/projects/myrepo    # Start agents
     $SCRIPT_NAME -p "Focus on the devnet" ~/projects/myrepo
     $SCRIPT_NAME status               # Check status
-    $SCRIPT_NAME down                 # Stop all agents
+    $SCRIPT_NAME down                 # Stop all agents and clean up
+    $SCRIPT_NAME clean                # Clean stale temp dirs only
 
 ${BOLD}REQUIREMENTS:${NC}
     - gastown (gt) installed and in PATH
@@ -529,6 +531,91 @@ show_status() {
     fi
 }
 
+# Find all amptown temp directories
+find_amptown_dirs() {
+    local dirs=()
+    
+    # Check TMPDIR (macOS primary location)
+    if [[ -n "${TMPDIR:-}" ]]; then
+        local tmpdir="${TMPDIR%/}"
+        while IFS= read -r -d '' dir; do
+            dirs+=("$dir")
+        done < <(find "$tmpdir" -maxdepth 1 -type d -name "amptown-*" -print0 2>/dev/null || true)
+    fi
+    
+    # Check /tmp
+    while IFS= read -r -d '' dir; do
+        dirs+=("$dir")
+    done < <(find /tmp -maxdepth 1 -type d -name "amptown-*" -print0 2>/dev/null || true)
+    
+    # Check /var/folders (macOS)
+    if [[ -d /var/folders ]]; then
+        while IFS= read -r -d '' dir; do
+            dirs+=("$dir")
+        done < <(find /var/folders -type d -name "amptown-*" -print0 2>/dev/null || true)
+    fi
+    
+    # Remove duplicates
+    printf '%s\n' "${dirs[@]}" | sort -u
+}
+
+# Clean up temporary directories for an instance or all instances
+cleanup_temp_dirs() {
+    local cleaned=0
+    local freed_bytes=0
+    
+    log_info "Cleaning up temporary directories..."
+    
+    while IFS= read -r dir; do
+        [[ -z "$dir" ]] && continue
+        
+        # Extract instance ID from directory name
+        local dir_name
+        dir_name=$(basename "$dir")
+        local dir_instance_id="${dir_name#amptown-}"
+        
+        # If we have a specific instance ID, only clean that one
+        if [[ -n "$INSTANCE_ID" && "$dir_instance_id" != "$INSTANCE_ID" ]]; then
+            continue
+        fi
+        
+        # Check if any sessions are still running for this instance
+        local still_running=false
+        if tmux list-sessions -F "#{session_name}" 2>/dev/null | grep -q "^${TMUX_SESSION_PREFIX}-${dir_instance_id}-"; then
+            still_running=true
+        fi
+        
+        if [[ "$still_running" == true ]]; then
+            log_warn "Skipping $dir (sessions still running)"
+            continue
+        fi
+        
+        # Calculate size before deletion
+        local size
+        size=$(du -sk "$dir" 2>/dev/null | cut -f1 || echo 0)
+        freed_bytes=$((freed_bytes + size))
+        
+        # Remove the directory
+        if rm -rf "$dir" 2>/dev/null; then
+            log_info "Removed: $dir (${size}KB)"
+            cleaned=$((cleaned + 1))
+        else
+            log_warn "Failed to remove: $dir"
+        fi
+    done < <(find_amptown_dirs)
+    
+    if [[ $cleaned -eq 0 ]]; then
+        log_info "No temporary directories to clean"
+    else
+        local freed_mb=$((freed_bytes / 1024))
+        if [[ $freed_mb -gt 0 ]]; then
+            log_success "Cleaned $cleaned directories, freed ${freed_mb}MB"
+        else
+            log_success "Cleaned $cleaned directories, freed ${freed_bytes}KB"
+        fi
+    fi
+}
+
 # Stop all agents for a specific instance or all instances
 stop_all_agents() {
     log_header "Stopping Agents"
@@ -564,6 +651,10 @@ stop_all_agents() {
     else
         log_success "Stopped $stopped agents"
     fi
+    
+    # Clean up temporary directories
+    log_header "Cleaning Up"
+    cleanup_temp_dirs
 }
 
 # Monitor agents
@@ -636,6 +727,10 @@ main() {
                 action="status"
                 shift
                 ;;
+            --clean|clean)
+                action="clean"
+                shift
+                ;;
             --monitor|monitor)
                 action="monitor"
                 shift
@@ -666,6 +761,12 @@ main() {
     
     if [[ "$action" == "stop" ]]; then
         stop_all_agents
+        exit 0
+    fi
+    
+    if [[ "$action" == "clean" ]]; then
+        log_header "Cleaning Up Stale Directories"
+        cleanup_temp_dirs
         exit 0
     fi
     
