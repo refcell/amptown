@@ -45,6 +45,9 @@ struct App {
     
     // Refresh
     last_refresh: Instant,
+    
+    // Live indicator
+    tick: usize,
 }
 
 impl App {
@@ -69,6 +72,7 @@ impl App {
             modal_content: Arc::new(Mutex::new(String::new())),
             modal_loading: Arc::new(Mutex::new(false)),
             last_refresh: Instant::now(),
+            tick: 0,
         };
         app.agent_list_state.select(Some(0));
         app
@@ -292,8 +296,10 @@ fn main() -> Result<()> {
     let mut app = App::new();
     app.refresh();
     
-    let tick_rate = Duration::from_secs(5);
+    let tick_rate = Duration::from_millis(200); // Fast tick for spinner animation
+    let refresh_rate = Duration::from_secs(5);
     let mut last_tick = Instant::now();
+    let mut last_refresh = Instant::now();
     
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
@@ -331,8 +337,13 @@ fn main() -> Result<()> {
         }
         
         if last_tick.elapsed() >= tick_rate {
-            app.refresh();
+            app.tick = app.tick.wrapping_add(1);
             last_tick = Instant::now();
+        }
+        
+        if last_refresh.elapsed() >= refresh_rate {
+            app.refresh();
+            last_refresh = Instant::now();
         }
     }
     
@@ -358,10 +369,16 @@ fn ui(f: &mut Frame, app: &mut App) {
         ])
         .split(f.area());
     
+    // Animated spinner frames
+    const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let spinner = SPINNER_FRAMES[app.tick % SPINNER_FRAMES.len()];
+    
     // Header
     let header = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled(" AMPWATCH ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {} ", spinner), Style::default().fg(Color::Green)),
+            Span::styled("AMPWATCH ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("LIVE", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
             Span::raw(" │ "),
             Span::styled(
                 format!(" Agents {} ", if app.selected_tab == 0 { "●" } else { "○" }),
