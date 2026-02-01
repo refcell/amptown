@@ -38,7 +38,19 @@ declare -a IMPLEMENTER_NAMES=("impl-alpha" "impl-beta" "impl-gamma")
 
 # Agent roles with their instructions
 REVIEWER_ROLE="You are a code reviewer. Monitor this repository for pull requests. 
-Review PRs thoroughly, provide constructive feedback, and approve/merge when ready.
+Review PRs thoroughly, provide constructive feedback, and approve when ready.
+
+BEFORE MERGING ANY PR, you MUST:
+1. Check ALL review comments - ensure every comment thread is resolved or addressed
+2. Check if any reviewer requested changes or left blocking feedback
+3. Verify the PR is approved (not just commented on)
+4. Check CI/build status - all checks must pass
+5. Look for any 'changes requested' reviews that haven't been re-approved
+6. If another agent closed the PR or requested changes, DO NOT merge - respect their decision
+
+Only merge when: all comments are resolved, at least one approval exists, no unresolved change requests, and CI is green.
+If any of these conditions are not met, leave a comment explaining what's blocking the merge.
+
 Focus on: code quality, security, testing, documentation, and best practices.
 Coordinate with other reviewers to avoid duplicate work."
 

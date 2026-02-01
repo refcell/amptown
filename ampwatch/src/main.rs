@@ -83,21 +83,40 @@ impl App {
     }
     
     fn find_logs_dir(&mut self) {
-        // Search for amptown logs directories
-        let patterns = [
-            "/var/folders/**/amptown-*/logs",
-            "/tmp/amptown-*/logs",
-        ];
+        // Build patterns dynamically using TMPDIR if available
+        let mut patterns: Vec<String> = vec!["/tmp/amptown-*/logs".to_string()];
         
-        for pattern in patterns {
+        // Add TMPDIR-based pattern (most reliable on macOS)
+        if let Ok(tmpdir) = std::env::var("TMPDIR") {
+            let tmpdir = tmpdir.trim_end_matches('/');
+            patterns.insert(0, format!("{}/amptown-*/logs", tmpdir));
+        }
+        
+        // Also try common macOS /var/folders structure with explicit depth
+        patterns.push("/var/folders/*/*/*/*/amptown-*/logs".to_string());
+        
+        // Find the most recently modified logs directory
+        let mut best_path: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+        
+        for pattern in &patterns {
             if let Ok(paths) = glob::glob(pattern) {
                 for path in paths.flatten() {
                     if path.is_dir() {
-                        self.logs_dir = Some(path.to_string_lossy().to_string());
-                        return;
+                        // Get modification time to find the most recent
+                        if let Ok(metadata) = std::fs::metadata(&path) {
+                            if let Ok(modified) = metadata.modified() {
+                                if best_path.as_ref().map_or(true, |(_, t)| modified > *t) {
+                                    best_path = Some((path, modified));
+                                }
+                            }
+                        }
                     }
                 }
             }
+        }
+        
+        if let Some((path, _)) = best_path {
+            self.logs_dir = Some(path.to_string_lossy().to_string());
         }
     }
     
