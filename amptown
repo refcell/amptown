@@ -28,6 +28,7 @@ LOG_DIR=""
 REPO_PATH=""
 TOWN_PATH=""
 INSTRUCTIONS_FILE=""
+INSTRUCTIONS_TEXT=""
 REVIEWER_INSTRUCTIONS=""
 IMPLEMENTER_INSTRUCTIONS=""
 
@@ -77,11 +78,13 @@ ${BOLD}OPTIONS:${NC}
     -h, --help          Show this help message
     -t, --town PATH     Use existing gastown town directory
     -l, --logs PATH     Directory for agent logs
-    -i, --instructions FILE   Instructions for all agents
+    -i, --instructions FILE   Instructions file for all agents
+    -p, --prompt TEXT   Instructions text for all agents (inline)
     --dry-run           Show what would be done without executing
 
 ${BOLD}EXAMPLES:${NC}
     $SCRIPT_NAME ~/projects/myrepo    # Start agents
+    $SCRIPT_NAME -p "Focus on the devnet" ~/projects/myrepo
     $SCRIPT_NAME status               # Check status
     $SCRIPT_NAME down                 # Stop all agents
 
@@ -293,6 +296,20 @@ You MUST use the 'handoff' tool to continue work in a new thread when:
 When handing off, set follow=true and describe what work should continue.
 This ensures continuous operation without context overflow."
 
+    # Build custom instructions from file or text
+    local custom_instructions=""
+    if [[ -n "$INSTRUCTIONS_TEXT" ]]; then
+        custom_instructions="
+
+FOCUS AREA:
+$INSTRUCTIONS_TEXT"
+    elif [[ -n "$INSTRUCTIONS_FILE" ]] && [[ -f "$INSTRUCTIONS_FILE" ]]; then
+        custom_instructions="
+
+FOCUS AREA:
+$(cat "$INSTRUCTIONS_FILE")"
+    fi
+
     if [[ "$agent_type" == "reviewer" ]]; then
         cat > "$prompt_file" << EOF
 You are $agent_name, a STRICT code reviewer for this repository. You have HIGH STANDARDS.
@@ -327,6 +344,7 @@ Only if code is EXCELLENT:
   gh pr merge <number> --squash --delete-branch
 
 Be the gatekeeper. Bad code should NOT land. Request changes liberally.
+${custom_instructions}
 ${handoff_instructions}
 
 Start by checking 'gh pr list' and reviewing any open PRs with extreme scrutiny.
@@ -361,6 +379,7 @@ After making changes:
 
 Keep PRs small and focused. One logical change per PR.
 Submit frequently - don't wait for perfection.
+${custom_instructions}
 ${handoff_instructions}
 
 Start by exploring the codebase, then make your first small improvement.
@@ -530,6 +549,10 @@ main() {
                 ;;
             -i|--instructions)
                 INSTRUCTIONS_FILE="$2"
+                shift 2
+                ;;
+            -p|--prompt)
+                INSTRUCTIONS_TEXT="$2"
                 shift 2
                 ;;
             --reviewer-instructions)
