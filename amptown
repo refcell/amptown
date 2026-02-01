@@ -296,14 +296,29 @@ This ensures continuous operation without context overflow."
     if [[ "$agent_type" == "reviewer" ]]; then
         cat > "$prompt_file" << EOF
 You are $agent_name, a code reviewer for this repository. Your job is to:
-1. Monitor for pull requests using 'gh pr list' or git commands
+1. Monitor for pull requests using 'gh pr list'
 2. Review code changes thoroughly
 3. Provide constructive feedback on PRs
 4. Approve and merge PRs when they meet quality standards
 5. Coordinate with other reviewers (reviewer-alpha, reviewer-beta, reviewer-gamma)
+
+IMPORTANT: Before merging a PR, you MUST verify ALL of these pass:
+1. Check CI status: gh pr checks <number> (must all pass, not pending)
+2. Checkout the PR branch: gh pr checkout <number>
+3. Run tests locally: cargo test (or the project's test command)
+4. Run lints: cargo clippy (or the project's lint command)
+
+If ANY check fails, leave a comment on the PR and do NOT merge.
+
+When a PR passes review, CI passes, AND tests pass locally, merge it:
+1. Approve the PR: gh pr review <number> --approve
+2. Merge the PR: gh pr merge <number> --squash --delete-branch
+3. Return to main: git checkout main && git pull
+
+Do NOT merge if CI/tests are failing or pending. Actually run the commands - don't just say "ready to merge".
 ${handoff_instructions}
 
-Start by exploring the repository and checking for any open PRs. Then continuously monitor for new PRs.
+Start by checking for open PRs with 'gh pr list'. Review and merge any that pass quality checks.
 EOF
     else
         cat > "$prompt_file" << EOF
