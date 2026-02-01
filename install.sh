@@ -104,17 +104,32 @@ main() {
         mkdir -p "$install_dir"
     fi
     
-    # Download the script
+    # Download amptown script
     local target="${install_dir}/${SCRIPT_NAME}"
     log_info "Downloading amptown from GitHub..."
     
     if curl -fsSL "$RAW_URL" -o "$target"; then
         chmod +x "$target"
-        log_success "Installed to: $target"
+        log_success "Installed amptown to: $target"
     else
         log_error "Failed to download amptown"
         log_error "URL: $RAW_URL"
         exit 1
+    fi
+    
+    # Download ampwatch binary
+    log_info "Downloading ampwatch TUI..."
+    local ampwatch_target="${install_dir}/ampwatch"
+    local arch=$(uname -m)
+    local os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    local ampwatch_url="https://github.com/${REPO}/releases/latest/download/ampwatch-${os}-${arch}"
+    
+    if curl -fsSL "$ampwatch_url" -o "$ampwatch_target" 2>/dev/null; then
+        chmod +x "$ampwatch_target"
+        log_success "Installed ampwatch to: $ampwatch_target"
+    else
+        log_warn "ampwatch binary not available for ${os}-${arch}, skipping"
+        log_info "You can build it manually: cd ampwatch && cargo build --release"
     fi
     
     # Check if in PATH
@@ -139,9 +154,10 @@ main() {
     log_success "amptown installed successfully!"
     echo ""
     echo -e "${BOLD}Quick start:${NC}"
-    echo "  amptown ~/path/to/your/repo    # Start 6 agents on a repo"
-    echo "  amptown --status               # Check agent status"
-    echo "  amptown --help                 # Show all options"
+    echo "  amptown ~/path/to/repo    # Start 6 agents on a repo"
+    echo "  amptown status            # Check agent status"
+    echo "  amptown down              # Stop all agents"
+    echo "  ampwatch                  # Live TUI monitor"
     echo ""
     echo -e "${BOLD}Requirements:${NC}"
     echo "  • gastown (gt) - brew install gastown"

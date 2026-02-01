@@ -12,8 +12,10 @@ curl -fsSL https://raw.githubusercontent.com/refcell/amptown/main/install.sh | b
 
 ```bash
 amptown ~/path/to/repo     # Start 6 agents (3 reviewers, 3 implementers)
-amptown --status           # Check agent status
-amptown --stop             # Stop all agents
+amptown status             # Check agent status
+amptown down               # Stop all agents
+
+ampwatch                   # Live TUI monitor with PR summaries
 ```
 
 ## Requirements
