@@ -60,47 +60,30 @@ ${BOLD}amptown${NC} - Multi-agent gastown orchestrator
 
 ${BOLD}USAGE:${NC}
     $SCRIPT_NAME [OPTIONS] <repo-path>
+    $SCRIPT_NAME <command>
+
+${BOLD}COMMANDS:${NC}
+    down              Stop all amptown agents
+    status            Show status of running agents
+    monitor           Live monitor of agent status
 
 ${BOLD}DESCRIPTION:${NC}
-    Spawns 6 gastown instances using amp backend to autonomously develop a repository:
+    Spawns 6 amp agents to autonomously develop a repository:
     
-    ${CYAN}Reviewers (3):${NC}
-      - reviewer-alpha, reviewer-beta, reviewer-gamma
-      - Monitor PRs, review code, provide feedback, merge when ready
-    
-    ${CYAN}Implementers (3):${NC}
-      - impl-alpha, impl-beta, impl-gamma  
-      - Write code, fix bugs, create documentation, submit PRs
+    ${CYAN}Reviewers (3):${NC}  reviewer-alpha, reviewer-beta, reviewer-gamma
+    ${CYAN}Implementers (3):${NC}  impl-alpha, impl-beta, impl-gamma
 
 ${BOLD}OPTIONS:${NC}
     -h, --help          Show this help message
-    -t, --town PATH     Use existing gastown town directory (default: creates new in /tmp)
-    -l, --logs PATH     Directory for agent logs (default: <town>/logs)
-    -i, --instructions FILE   File with initial instructions for all agents
-    --reviewer-instructions FILE   File with instructions for reviewers only
-    --implementer-instructions FILE   File with instructions for implementers only
+    -t, --town PATH     Use existing gastown town directory
+    -l, --logs PATH     Directory for agent logs
+    -i, --instructions FILE   Instructions for all agents
     --dry-run           Show what would be done without executing
-    --stop              Stop all amptown instances
-    --status            Show status of running instances
 
 ${BOLD}EXAMPLES:${NC}
-    # Start amptown for a repository
-    $SCRIPT_NAME ~/projects/myrepo
-
-    # Use a specific town directory
-    $SCRIPT_NAME --town ~/my-gt ~/projects/myrepo
-
-    # Provide custom instructions for all agents
-    $SCRIPT_NAME -i instructions.md ~/projects/myrepo
-
-    # Separate instructions for reviewers and implementers
-    $SCRIPT_NAME --reviewer-instructions review.md --implementer-instructions impl.md ~/projects/myrepo
-
-    # Check status of running agents
-    $SCRIPT_NAME --status
-
-    # Stop all agents
-    $SCRIPT_NAME --stop
+    $SCRIPT_NAME ~/projects/myrepo    # Start agents
+    $SCRIPT_NAME status               # Check status
+    $SCRIPT_NAME down                 # Stop all agents
 
 ${BOLD}REQUIREMENTS:${NC}
     - gastown (gt) installed and in PATH
@@ -293,42 +276,95 @@ spawn_agent() {
     fi
     
     local log_file="$LOG_DIR/${agent_name}.log"
-    local instructions_file
-    instructions_file=$(create_agent_instructions "$agent_name" "$agent_type")
+    local prompt_file="$LOG_DIR/${agent_name}-prompt.txt"
     
     log_info "Spawning $agent_type: $agent_name"
     
-    # Create tmux session running amp in the repo directory
-    tmux new-session -d -s "$session_name" -c "$REPO_PATH" \
-        "amp --dangerously-allow-all --no-ide 2>&1 | tee -a '$log_file'"
-    
-    # Give it a moment to start
-    sleep 1
-    
-    # Send initial prompt to the agent
-    local initial_prompt
+    # Write the prompt to a file to avoid shell escaping issues
+    # Include handoff instructions to prevent context overflow
+    local handoff_instructions="
+
+CRITICAL: Context Management
+You MUST use the 'handoff' tool to continue work in a new thread when:
+- You have completed a significant task or milestone
+- You notice responses getting slower or context feeling constrained
+- After every 3-5 substantial operations (file edits, PR reviews, etc.)
+
+When handing off, set follow=true and describe what work should continue.
+This ensures continuous operation without context overflow."
+
     if [[ "$agent_type" == "reviewer" ]]; then
-        initial_prompt="You are $agent_name, a code reviewer for this repository. Your job is to:
+        cat > "$prompt_file" << EOF
+You are $agent_name, a code reviewer for this repository. Your job is to:
 1. Monitor for pull requests using 'gh pr list' or git commands
 2. Review code changes thoroughly
 3. Provide constructive feedback on PRs
 4. Approve and merge PRs when they meet quality standards
 5. Coordinate with other reviewers (reviewer-alpha, reviewer-beta, reviewer-gamma)
+${handoff_instructions}
 
-Start by exploring the repository and checking for any open PRs. Then continuously monitor for new PRs."
+Start by exploring the repository and checking for any open PRs. Then continuously monitor for new PRs.
+EOF
     else
-        initial_prompt="You are $agent_name, a code implementer for this repository. Your job is to:
+        cat > "$prompt_file" << EOF
+You are $agent_name, a code implementer for this repository. Your job is to:
 1. Explore the codebase and identify areas that need work
 2. Implement features, fix bugs, improve documentation
 3. Create pull requests for your changes
 4. Follow the project's coding standards and conventions
 5. Coordinate with other implementers (impl-alpha, impl-beta, impl-gamma)
 
-Start by exploring the repository structure, checking the README, and identifying what needs to be built or improved."
+IMPORTANT: After making changes, you MUST:
+1. Create a new branch: git checkout -b $agent_name/<short-description>
+2. Commit your changes: git add -A && git commit -m "description"
+3. Push the branch: git push -u origin HEAD
+4. Create a PR: gh pr create --title "Title" --body "Description"
+
+Do NOT leave uncommitted changes. Always create a PR for your work.
+${handoff_instructions}
+
+Start by exploring the repository structure, checking the README, and identifying what needs to be built or improved.
+EOF
     fi
     
-    # Send the prompt to the tmux session
-    tmux send-keys -t "$session_name" "$initial_prompt" Enter
+    # Create a launcher script that runs amp in a loop
+    # When amp exits (naturally or via timeout), restart with continuation prompt
+    local launcher="$LOG_DIR/${agent_name}-launcher.sh"
+    cat > "$launcher" << 'LAUNCHER'
+#!/usr/bin/env bash
+set -u
+PROMPT_FILE="$1"
+LOG_FILE="$2"
+AGENT_NAME="$3"
+
+initial_prompt=$(cat "$PROMPT_FILE")
+iteration=0
+
+while true; do
+    iteration=$((iteration + 1))
+    echo "[$(date)] Starting $AGENT_NAME iteration $iteration" >> "$LOG_FILE"
+    
+    if [[ $iteration -eq 1 ]]; then
+        prompt="$initial_prompt"
+    else
+        prompt="You are $AGENT_NAME continuing your work in a fresh thread. Your previous thread likely hit the context limit. Use find_thread to locate your recent work, review what was done, and continue where you left off. Remember to use handoff with follow=true before context fills again."
+    fi
+    
+    # Run amp and log output
+    amp --dangerously-allow-all --no-ide --execute "$prompt" 2>&1 | tee -a "$LOG_FILE"
+    exit_code=$?
+    
+    echo "[$(date)] $AGENT_NAME iteration $iteration ended (exit code: $exit_code)" >> "$LOG_FILE"
+    
+    # Brief pause before restarting
+    sleep 5
+done
+LAUNCHER
+    chmod +x "$launcher"
+    
+    # Create tmux session running the launcher
+    tmux new-session -d -s "$session_name" -c "$REPO_PATH" \
+        "$launcher '$prompt_file' '$log_file' '$agent_name'"
     
     log_success "Started $agent_name (session: $session_name, log: $log_file)"
 }
@@ -468,15 +504,15 @@ main() {
                 dry_run=true
                 shift
                 ;;
-            --stop)
+            --stop|down)
                 action="stop"
                 shift
                 ;;
-            --status)
+            --status|status)
                 action="status"
                 shift
                 ;;
-            --monitor)
+            --monitor|monitor)
                 action="monitor"
                 shift
                 ;;
