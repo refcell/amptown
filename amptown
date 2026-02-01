@@ -1,0 +1,559 @@
+#!/usr/bin/env bash
+#
+# amptown - Multi-agent gastown orchestrator
+#
+# Spawns 6 gastown instances for autonomous repository development:
+#   - 3 Reviewers: Monitor PRs, deliberate on merging, provide feedback
+#   - 3 Implementers: Write code and documentation
+#
+# Usage: amptown [OPTIONS] <repo-path>
+#
+
+set -euo pipefail
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# Configuration
+SCRIPT_NAME="amptown"
+AGENT_BACKEND="amp"
+TMUX_SESSION_PREFIX="amptown"
+LOG_DIR=""
+REPO_PATH=""
+TOWN_PATH=""
+INSTRUCTIONS_FILE=""
+REVIEWER_INSTRUCTIONS=""
+IMPLEMENTER_INSTRUCTIONS=""
+
+# Agent definitions
+declare -a REVIEWER_NAMES=("reviewer-alpha" "reviewer-beta" "reviewer-gamma")
+declare -a IMPLEMENTER_NAMES=("impl-alpha" "impl-beta" "impl-gamma")
+
+# Agent roles with their instructions
+REVIEWER_ROLE="You are a code reviewer. Monitor this repository for pull requests. 
+Review PRs thoroughly, provide constructive feedback, and approve/merge when ready.
+Focus on: code quality, security, testing, documentation, and best practices.
+Coordinate with other reviewers to avoid duplicate work."
+
+IMPLEMENTER_ROLE="You are a code implementer. Build features, fix bugs, and write documentation.
+Create PRs for your changes. Follow the project's coding standards.
+Focus on: clean code, comprehensive tests, clear documentation, and small focused PRs.
+Coordinate with other implementers to avoid conflicts."
+
+# Logging functions
+log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
+log_success() { echo -e "${GREEN}[OK]${NC} $*"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+log_header() { echo -e "\n${BOLD}${CYAN}=== $* ===${NC}\n"; }
+
+# Print usage
+usage() {
+    cat << EOF
+${BOLD}amptown${NC} - Multi-agent gastown orchestrator
+
+${BOLD}USAGE:${NC}
+    $SCRIPT_NAME [OPTIONS] <repo-path>
+
+${BOLD}DESCRIPTION:${NC}
+    Spawns 6 gastown instances using amp backend to autonomously develop a repository:
+    
+    ${CYAN}Reviewers (3):${NC}
+      - reviewer-alpha, reviewer-beta, reviewer-gamma
+      - Monitor PRs, review code, provide feedback, merge when ready
+    
+    ${CYAN}Implementers (3):${NC}
+      - impl-alpha, impl-beta, impl-gamma  
+      - Write code, fix bugs, create documentation, submit PRs
+
+${BOLD}OPTIONS:${NC}
+    -h, --help          Show this help message
+    -t, --town PATH     Use existing gastown town directory (default: creates new in /tmp)
+    -l, --logs PATH     Directory for agent logs (default: <town>/logs)
+    -i, --instructions FILE   File with initial instructions for all agents
+    --reviewer-instructions FILE   File with instructions for reviewers only
+    --implementer-instructions FILE   File with instructions for implementers only
+    --dry-run           Show what would be done without executing
+    --stop              Stop all amptown instances
+    --status            Show status of running instances
+
+${BOLD}EXAMPLES:${NC}
+    # Start amptown for a repository
+    $SCRIPT_NAME ~/projects/myrepo
+
+    # Use a specific town directory
+    $SCRIPT_NAME --town ~/my-gt ~/projects/myrepo
+
+    # Provide custom instructions for all agents
+    $SCRIPT_NAME -i instructions.md ~/projects/myrepo
+
+    # Separate instructions for reviewers and implementers
+    $SCRIPT_NAME --reviewer-instructions review.md --implementer-instructions impl.md ~/projects/myrepo
+
+    # Check status of running agents
+    $SCRIPT_NAME --status
+
+    # Stop all agents
+    $SCRIPT_NAME --stop
+
+${BOLD}REQUIREMENTS:${NC}
+    - gastown (gt) installed and in PATH
+    - amp CLI installed and in PATH
+    - tmux installed
+    - git repository at <repo-path>
+
+EOF
+    exit 0
+}
+
+# Check if a command exists
+check_command() {
+    local cmd="$1"
+    local install_hint="${2:-}"
+    
+    if ! command -v "$cmd" &> /dev/null; then
+        log_error "'$cmd' is not installed or not in PATH"
+        if [[ -n "$install_hint" ]]; then
+            log_error "Install with: $install_hint"
+        fi
+        return 1
+    fi
+    return 0
+}
+
+# Verify all prerequisites
+check_prerequisites() {
+    log_header "Checking Prerequisites"
+    
+    local failed=0
+    
+    # Check gastown
+    if ! check_command "gt" "brew install gastown OR npm install -g @gastown/gt OR go install github.com/steveyegge/gastown/cmd/gt@latest"; then
+        failed=1
+    else
+        log_success "gastown (gt) found: $(command -v gt)"
+    fi
+    
+    # Check amp
+    if ! check_command "amp" "Visit https://ampcode.com for installation instructions"; then
+        failed=1
+    else
+        log_success "amp found: $(command -v amp)"
+    fi
+    
+    # Check tmux
+    if ! check_command "tmux" "brew install tmux OR apt install tmux"; then
+        failed=1
+    else
+        log_success "tmux found: $(command -v tmux)"
+    fi
+    
+    # Check git
+    if ! check_command "git" "brew install git OR apt install git"; then
+        failed=1
+    else
+        log_success "git found: $(command -v git)"
+    fi
+    
+    if [[ $failed -eq 1 ]]; then
+        log_error "Missing prerequisites. Please install them and try again."
+        exit 1
+    fi
+    
+    log_success "All prerequisites satisfied"
+}
+
+# Validate repository path
+validate_repo() {
+    local repo="$1"
+    
+    if [[ ! -d "$repo" ]]; then
+        log_error "Repository path does not exist: $repo"
+        exit 1
+    fi
+    
+    if [[ ! -d "$repo/.git" ]]; then
+        log_error "Not a git repository: $repo"
+        exit 1
+    fi
+    
+    log_success "Valid git repository: $repo"
+}
+
+# Create or validate town directory
+setup_town() {
+    if [[ -z "$TOWN_PATH" ]]; then
+        TOWN_PATH=$(mktemp -d "${TMPDIR:-/tmp}/amptown-XXXXXX")
+        log_info "Created temporary town: $TOWN_PATH"
+    fi
+    
+    # Initialize gastown if needed
+    if [[ ! -f "$TOWN_PATH/.gt-town" ]] && [[ ! -f "$TOWN_PATH/settings/config.json" ]]; then
+        log_info "Initializing gastown town at $TOWN_PATH"
+        gt install "$TOWN_PATH" --git 2>/dev/null || {
+            # Try without --git flag if it fails
+            gt install "$TOWN_PATH" 2>/dev/null || true
+        }
+    fi
+    
+    LOG_DIR="${LOG_DIR:-$TOWN_PATH/logs}"
+    mkdir -p "$LOG_DIR"
+    
+    log_success "Town directory ready: $TOWN_PATH"
+}
+
+# Add the repository as a rig
+setup_rig() {
+    local repo_name
+    repo_name=$(basename "$REPO_PATH")
+    
+    log_info "Setting up rig for $repo_name"
+    
+    cd "$TOWN_PATH"
+    
+    # Check if rig already exists
+    if gt rig list 2>/dev/null | grep -q "$repo_name"; then
+        log_info "Rig '$repo_name' already exists"
+    else
+        # Add the rig - use local path
+        gt rig add "$repo_name" "$REPO_PATH" 2>/dev/null || {
+            log_warn "Could not add rig via gt, will use direct approach"
+        }
+    fi
+    
+    echo "$repo_name"
+}
+
+# Generate unique session name
+get_session_name() {
+    local agent_name="$1"
+    echo "${TMUX_SESSION_PREFIX}-${agent_name}"
+}
+
+# Check if a tmux session exists
+session_exists() {
+    local session="$1"
+    tmux has-session -t "$session" 2>/dev/null
+}
+
+# Create agent instruction file
+create_agent_instructions() {
+    local agent_name="$1"
+    local agent_type="$2"  # "reviewer" or "implementer"
+    local instructions_file="$LOG_DIR/${agent_name}-instructions.md"
+    
+    local role_text
+    if [[ "$agent_type" == "reviewer" ]]; then
+        role_text="$REVIEWER_ROLE"
+    else
+        role_text="$IMPLEMENTER_ROLE"
+    fi
+    
+    cat > "$instructions_file" << EOF
+# Agent: $agent_name
+
+## Role
+$role_text
+
+## Repository
+Working on: $REPO_PATH
+
+## Coordination
+- Other ${agent_type}s are working in parallel
+- Check for existing PRs before starting new work
+- Communicate status via git commits and PR comments
+- Avoid modifying the same files as other agents
+
+## Getting Started
+1. Explore the repository structure
+2. Check existing issues and PRs
+3. Identify work that needs to be done
+4. Start with small, focused changes
+EOF
+    
+    echo "$instructions_file"
+}
+
+# Spawn a single agent
+spawn_agent() {
+    local agent_name="$1"
+    local agent_type="$2"
+    local session_name
+    session_name=$(get_session_name "$agent_name")
+    
+    if session_exists "$session_name"; then
+        log_warn "Session $session_name already exists, skipping"
+        return 0
+    fi
+    
+    local log_file="$LOG_DIR/${agent_name}.log"
+    local instructions_file
+    instructions_file=$(create_agent_instructions "$agent_name" "$agent_type")
+    
+    log_info "Spawning $agent_type: $agent_name"
+    
+    # Create tmux session running amp in the repo directory
+    tmux new-session -d -s "$session_name" -c "$REPO_PATH" \
+        "amp --dangerously-allow-all --no-ide 2>&1 | tee -a '$log_file'"
+    
+    # Give it a moment to start
+    sleep 1
+    
+    # Send initial prompt to the agent
+    local initial_prompt
+    if [[ "$agent_type" == "reviewer" ]]; then
+        initial_prompt="You are $agent_name, a code reviewer for this repository. Your job is to:
+1. Monitor for pull requests using 'gh pr list' or git commands
+2. Review code changes thoroughly
+3. Provide constructive feedback on PRs
+4. Approve and merge PRs when they meet quality standards
+5. Coordinate with other reviewers (reviewer-alpha, reviewer-beta, reviewer-gamma)
+
+Start by exploring the repository and checking for any open PRs. Then continuously monitor for new PRs."
+    else
+        initial_prompt="You are $agent_name, a code implementer for this repository. Your job is to:
+1. Explore the codebase and identify areas that need work
+2. Implement features, fix bugs, improve documentation
+3. Create pull requests for your changes
+4. Follow the project's coding standards and conventions
+5. Coordinate with other implementers (impl-alpha, impl-beta, impl-gamma)
+
+Start by exploring the repository structure, checking the README, and identifying what needs to be built or improved."
+    fi
+    
+    # Send the prompt to the tmux session
+    tmux send-keys -t "$session_name" "$initial_prompt" Enter
+    
+    log_success "Started $agent_name (session: $session_name, log: $log_file)"
+}
+
+# Spawn all agents
+spawn_all_agents() {
+    log_header "Spawning Reviewers"
+    for name in "${REVIEWER_NAMES[@]}"; do
+        spawn_agent "$name" "reviewer"
+        sleep 2  # Stagger spawns to avoid rate limits
+    done
+    
+    log_header "Spawning Implementers"
+    for name in "${IMPLEMENTER_NAMES[@]}"; do
+        spawn_agent "$name" "implementer"
+        sleep 2
+    done
+}
+
+# Show status of all agents
+show_status() {
+    log_header "Agent Status"
+    
+    local found=0
+    
+    echo -e "${BOLD}Reviewers:${NC}"
+    for name in "${REVIEWER_NAMES[@]}"; do
+        local session_name
+        session_name=$(get_session_name "$name")
+        if session_exists "$session_name"; then
+            echo -e "  ${GREEN}●${NC} $name (session: $session_name)"
+            found=1
+        else
+            echo -e "  ${RED}○${NC} $name (not running)"
+        fi
+    done
+    
+    echo ""
+    echo -e "${BOLD}Implementers:${NC}"
+    for name in "${IMPLEMENTER_NAMES[@]}"; do
+        local session_name
+        session_name=$(get_session_name "$name")
+        if session_exists "$session_name"; then
+            echo -e "  ${GREEN}●${NC} $name (session: $session_name)"
+            found=1
+        else
+            echo -e "  ${RED}○${NC} $name (not running)"
+        fi
+    done
+    
+    if [[ $found -eq 0 ]]; then
+        echo ""
+        log_info "No agents are currently running"
+    else
+        echo ""
+        echo -e "${BOLD}Commands:${NC}"
+        echo "  Attach to agent:  tmux attach -t ${TMUX_SESSION_PREFIX}-<agent-name>"
+        echo "  View all:         tmux list-sessions | grep ${TMUX_SESSION_PREFIX}"
+        echo "  Stop all:         $SCRIPT_NAME --stop"
+    fi
+}
+
+# Stop all agents
+stop_all_agents() {
+    log_header "Stopping All Agents"
+    
+    local stopped=0
+    
+    for name in "${REVIEWER_NAMES[@]}" "${IMPLEMENTER_NAMES[@]}"; do
+        local session_name
+        session_name=$(get_session_name "$name")
+        if session_exists "$session_name"; then
+            log_info "Stopping $name..."
+            tmux kill-session -t "$session_name" 2>/dev/null || true
+            stopped=$((stopped + 1))
+        fi
+    done
+    
+    if [[ $stopped -eq 0 ]]; then
+        log_info "No agents were running"
+    else
+        log_success "Stopped $stopped agents"
+    fi
+}
+
+# Monitor agents
+monitor_agents() {
+    log_header "Monitoring Agents"
+    log_info "Press Ctrl+C to exit monitoring"
+    echo ""
+    
+    while true; do
+        clear
+        echo -e "${BOLD}${CYAN}=== AMPTOWN Monitor ===${NC}"
+        echo -e "Repository: $REPO_PATH"
+        echo -e "Time: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo ""
+        
+        show_status
+        
+        sleep 5
+    done
+}
+
+# Main function
+main() {
+    local dry_run=false
+    local action="start"
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                usage
+                ;;
+            -t|--town)
+                TOWN_PATH="$2"
+                shift 2
+                ;;
+            -l|--logs)
+                LOG_DIR="$2"
+                shift 2
+                ;;
+            -i|--instructions)
+                INSTRUCTIONS_FILE="$2"
+                shift 2
+                ;;
+            --reviewer-instructions)
+                REVIEWER_INSTRUCTIONS="$2"
+                shift 2
+                ;;
+            --implementer-instructions)
+                IMPLEMENTER_INSTRUCTIONS="$2"
+                shift 2
+                ;;
+            --dry-run)
+                dry_run=true
+                shift
+                ;;
+            --stop)
+                action="stop"
+                shift
+                ;;
+            --status)
+                action="status"
+                shift
+                ;;
+            --monitor)
+                action="monitor"
+                shift
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                echo "Use '$SCRIPT_NAME --help' for usage"
+                exit 1
+                ;;
+            *)
+                REPO_PATH="$1"
+                shift
+                ;;
+        esac
+    done
+    
+    # Handle status/stop without repo path
+    if [[ "$action" == "status" ]]; then
+        show_status
+        exit 0
+    fi
+    
+    if [[ "$action" == "stop" ]]; then
+        stop_all_agents
+        exit 0
+    fi
+    
+    # For start/monitor, we need repo path
+    if [[ -z "$REPO_PATH" ]]; then
+        log_error "Repository path required"
+        echo "Use '$SCRIPT_NAME --help' for usage"
+        exit 1
+    fi
+    
+    # Resolve to absolute path
+    REPO_PATH=$(cd "$REPO_PATH" && pwd)
+    
+    # Run startup sequence
+    check_prerequisites
+    validate_repo "$REPO_PATH"
+    
+    if [[ "$dry_run" == true ]]; then
+        log_header "Dry Run - Would Execute"
+        echo "Repository: $REPO_PATH"
+        echo "Town: ${TOWN_PATH:-<auto-generated>}"
+        echo ""
+        echo "Would spawn:"
+        echo "  Reviewers: ${REVIEWER_NAMES[*]}"
+        echo "  Implementers: ${IMPLEMENTER_NAMES[*]}"
+        exit 0
+    fi
+    
+    setup_town
+    
+    log_header "Starting AMPTOWN"
+    echo -e "Repository: ${CYAN}$REPO_PATH${NC}"
+    echo -e "Town: ${CYAN}$TOWN_PATH${NC}"
+    echo -e "Logs: ${CYAN}$LOG_DIR${NC}"
+    echo ""
+    
+    spawn_all_agents
+    
+    log_header "AMPTOWN is Running"
+    echo -e "${GREEN}All 6 agents have been spawned!${NC}"
+    echo ""
+    echo -e "${BOLD}Reviewers:${NC} ${REVIEWER_NAMES[*]}"
+    echo -e "${BOLD}Implementers:${NC} ${IMPLEMENTER_NAMES[*]}"
+    echo ""
+    echo -e "${BOLD}Useful commands:${NC}"
+    echo "  View status:      $SCRIPT_NAME --status"
+    echo "  Stop all:         $SCRIPT_NAME --stop"
+    echo "  Attach to agent:  tmux attach -t ${TMUX_SESSION_PREFIX}-<agent-name>"
+    echo "  View logs:        tail -f $LOG_DIR/<agent-name>.log"
+    echo ""
+    
+    if [[ "$action" == "monitor" ]]; then
+        monitor_agents
+    fi
+}
+
+main "$@"
