@@ -23,6 +23,7 @@ NC='\033[0m' # No Color
 # Configuration
 SCRIPT_NAME="amptown"
 AGENT_BACKEND="amp"
+INSTANCE_ID=""  # Unique ID for this amptown instance
 TMUX_SESSION_PREFIX="amptown"
 LOG_DIR=""
 REPO_PATH=""
@@ -92,6 +93,7 @@ ${BOLD}OPTIONS:${NC}
     -l, --logs PATH     Directory for agent logs
     -i, --instructions FILE   Instructions file for all agents
     -p, --prompt TEXT   Instructions text for all agents (inline)
+    --instance ID       Use specific instance ID (auto-generated from repo path if not set)
     --dry-run           Show what would be done without executing
 
 ${BOLD}EXAMPLES:${NC}
@@ -228,10 +230,22 @@ setup_rig() {
     echo "$repo_name"
 }
 
-# Generate unique session name
+# Generate unique instance ID based on repo path
+generate_instance_id() {
+    local repo="$1"
+    # Create a short hash from the repo path for uniqueness
+    # Works on both Linux (md5sum) and macOS (md5)
+    if command -v md5sum &>/dev/null; then
+        echo "$repo" | md5sum | cut -c1-8
+    else
+        echo "$repo" | md5 | cut -c1-8
+    fi
+}
+
+# Generate unique session name (includes instance ID for isolation)
 get_session_name() {
     local agent_name="$1"
-    echo "${TMUX_SESSION_PREFIX}-${agent_name}"
+    echo "${TMUX_SESSION_PREFIX}-${INSTANCE_ID}-${agent_name}"
 }
 
 # Check if a tmux session exists
@@ -455,36 +469,52 @@ spawn_all_agents() {
     done
 }
 
-# Show status of all agents
+# Show status of all agents (for a specific instance or all instances)
 show_status() {
     log_header "Agent Status"
     
     local found=0
     
-    echo -e "${BOLD}Reviewers:${NC}"
-    for name in "${REVIEWER_NAMES[@]}"; do
-        local session_name
-        session_name=$(get_session_name "$name")
-        if session_exists "$session_name"; then
-            echo -e "  ${GREEN}●${NC} $name (session: $session_name)"
+    # If we have an instance ID, show status for that instance only
+    if [[ -n "$INSTANCE_ID" ]]; then
+        echo -e "${BOLD}Instance:${NC} $INSTANCE_ID"
+        echo ""
+        echo -e "${BOLD}Reviewers:${NC}"
+        for name in "${REVIEWER_NAMES[@]}"; do
+            local session_name
+            session_name=$(get_session_name "$name")
+            if session_exists "$session_name"; then
+                echo -e "  ${GREEN}●${NC} $name (session: $session_name)"
+                found=1
+            else
+                echo -e "  ${RED}○${NC} $name (not running)"
+            fi
+        done
+        
+        echo ""
+        echo -e "${BOLD}Implementers:${NC}"
+        for name in "${IMPLEMENTER_NAMES[@]}"; do
+            local session_name
+            session_name=$(get_session_name "$name")
+            if session_exists "$session_name"; then
+                echo -e "  ${GREEN}●${NC} $name (session: $session_name)"
+                found=1
+            else
+                echo -e "  ${RED}○${NC} $name (not running)"
+            fi
+        done
+    else
+        # No instance ID - show all running amptown sessions
+        echo -e "${BOLD}All running amptown sessions:${NC}"
+        local sessions
+        sessions=$(tmux list-sessions 2>/dev/null | grep "^${TMUX_SESSION_PREFIX}-" || true)
+        if [[ -n "$sessions" ]]; then
+            echo "$sessions" | while read -r line; do
+                echo -e "  ${GREEN}●${NC} $line"
+            done
             found=1
-        else
-            echo -e "  ${RED}○${NC} $name (not running)"
         fi
-    done
-    
-    echo ""
-    echo -e "${BOLD}Implementers:${NC}"
-    for name in "${IMPLEMENTER_NAMES[@]}"; do
-        local session_name
-        session_name=$(get_session_name "$name")
-        if session_exists "$session_name"; then
-            echo -e "  ${GREEN}●${NC} $name (session: $session_name)"
-            found=1
-        else
-            echo -e "  ${RED}○${NC} $name (not running)"
-        fi
-    done
+    fi
     
     if [[ $found -eq 0 ]]; then
         echo ""
@@ -492,27 +522,42 @@ show_status() {
     else
         echo ""
         echo -e "${BOLD}Commands:${NC}"
-        echo "  Attach to agent:  tmux attach -t ${TMUX_SESSION_PREFIX}-<agent-name>"
+        echo "  Attach to agent:  tmux attach -t <session-name>"
         echo "  View all:         tmux list-sessions | grep ${TMUX_SESSION_PREFIX}"
-        echo "  Stop all:         $SCRIPT_NAME --stop"
+        echo "  Stop all:         $SCRIPT_NAME down <repo-path>"
+        echo "  Stop specific:    $SCRIPT_NAME down --instance <instance-id>"
     fi
 }
 
-# Stop all agents
+# Stop all agents for a specific instance or all instances
 stop_all_agents() {
-    log_header "Stopping All Agents"
+    log_header "Stopping Agents"
     
     local stopped=0
     
-    for name in "${REVIEWER_NAMES[@]}" "${IMPLEMENTER_NAMES[@]}"; do
-        local session_name
-        session_name=$(get_session_name "$name")
-        if session_exists "$session_name"; then
-            log_info "Stopping $name..."
-            tmux kill-session -t "$session_name" 2>/dev/null || true
+    if [[ -n "$INSTANCE_ID" ]]; then
+        # Stop agents for specific instance
+        log_info "Stopping instance: $INSTANCE_ID"
+        for name in "${REVIEWER_NAMES[@]}" "${IMPLEMENTER_NAMES[@]}"; do
+            local session_name
+            session_name=$(get_session_name "$name")
+            if session_exists "$session_name"; then
+                log_info "Stopping $name..."
+                tmux kill-session -t "$session_name" 2>/dev/null || true
+                stopped=$((stopped + 1))
+            fi
+        done
+    else
+        # Stop all amptown sessions
+        log_info "Stopping all amptown instances"
+        local sessions
+        sessions=$(tmux list-sessions -F "#{session_name}" 2>/dev/null | grep "^${TMUX_SESSION_PREFIX}-" || true)
+        for session in $sessions; do
+            log_info "Stopping session: $session"
+            tmux kill-session -t "$session" 2>/dev/null || true
             stopped=$((stopped + 1))
-        fi
-    done
+        done
+    fi
     
     if [[ $stopped -eq 0 ]]; then
         log_info "No agents were running"
@@ -579,6 +624,10 @@ main() {
                 dry_run=true
                 shift
                 ;;
+            --instance)
+                INSTANCE_ID="$2"
+                shift 2
+                ;;
             --stop|down)
                 action="stop"
                 shift
@@ -603,6 +652,12 @@ main() {
         esac
     done
     
+    # Generate instance ID from repo path if provided and not already set
+    if [[ -n "$REPO_PATH" && -z "$INSTANCE_ID" ]]; then
+        REPO_PATH=$(cd "$REPO_PATH" && pwd)
+        INSTANCE_ID=$(generate_instance_id "$REPO_PATH")
+    fi
+    
     # Handle status/stop without repo path
     if [[ "$action" == "status" ]]; then
         show_status
@@ -621,9 +676,6 @@ main() {
         exit 1
     fi
     
-    # Resolve to absolute path
-    REPO_PATH=$(cd "$REPO_PATH" && pwd)
-    
     # Run startup sequence
     check_prerequisites
     validate_repo "$REPO_PATH"
@@ -631,6 +683,7 @@ main() {
     if [[ "$dry_run" == true ]]; then
         log_header "Dry Run - Would Execute"
         echo "Repository: $REPO_PATH"
+        echo "Instance ID: $INSTANCE_ID"
         echo "Town: ${TOWN_PATH:-<auto-generated>}"
         echo ""
         echo "Would spawn:"
@@ -643,6 +696,7 @@ main() {
     
     log_header "Starting AMPTOWN"
     echo -e "Repository: ${CYAN}$REPO_PATH${NC}"
+    echo -e "Instance ID: ${CYAN}$INSTANCE_ID${NC}"
     echo -e "Town: ${CYAN}$TOWN_PATH${NC}"
     echo -e "Logs: ${CYAN}$LOG_DIR${NC}"
     echo ""
@@ -652,13 +706,15 @@ main() {
     log_header "AMPTOWN is Running"
     echo -e "${GREEN}All 6 agents have been spawned!${NC}"
     echo ""
+    echo -e "${BOLD}Instance ID:${NC} $INSTANCE_ID"
     echo -e "${BOLD}Reviewers:${NC} ${REVIEWER_NAMES[*]}"
     echo -e "${BOLD}Implementers:${NC} ${IMPLEMENTER_NAMES[*]}"
     echo ""
     echo -e "${BOLD}Useful commands:${NC}"
-    echo "  View status:      $SCRIPT_NAME --status"
-    echo "  Stop all:         $SCRIPT_NAME --stop"
-    echo "  Attach to agent:  tmux attach -t ${TMUX_SESSION_PREFIX}-<agent-name>"
+    echo "  View status:      $SCRIPT_NAME status $REPO_PATH"
+    echo "  Stop this:        $SCRIPT_NAME down $REPO_PATH"
+    echo "  Stop all:         $SCRIPT_NAME down"
+    echo "  Attach to agent:  tmux attach -t ${TMUX_SESSION_PREFIX}-${INSTANCE_ID}-<agent-name>"
     echo "  View logs:        tail -f $LOG_DIR/<agent-name>.log"
     echo ""
     
